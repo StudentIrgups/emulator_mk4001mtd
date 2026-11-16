@@ -1,0 +1,24 @@
+.program sdio_dat_tx
+
+; in_base = GP3 (pin 0 = CLK)
+; out_base / set_base = GP4 (4 пина: DAT0..DAT3)
+; autopull = 32 (MSB first)
+
+public start_tx:
+    pull block                  ; Берем счетчик нибблов - 1 (1041 = 1 start + 1024 data + 16 crc)
+    mov x, osr
+    set pins, 0x0F              ; Уровень '1' на всех DAT0-3
+    wait 0 pin 0                ; Ждем низкий уровень CLK
+    set pindirs, 0x0F           ; Включаем DAT0-DAT3 на выход
+
+tx_loop:
+    out pins, 4                 ; Выставляем 4 бита (ниббл) на спаде CLK
+    wait 1 pin 0                ; N91 считывает на фронте CLK
+    wait 0 pin 0                ; Ждем спад CLK
+    jmp x-- tx_loop
+
+    set pins, 0x0F              ; Стоповый ниббл 0xF (End bit)
+    wait 1 pin 0
+    wait 0 pin 0
+    set pindirs, 0x00           ; Возвращаем DAT0-DAT3 в режим входа (High-Z)
+    irq set 0                   ; Сигнализируем Core 0 о завершении блока

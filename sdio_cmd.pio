@@ -1,0 +1,45 @@
+.program sdio_cmd
+
+; Pin 0 = CMD (GP2), Pin 1 = CLK (GP3)
+; autopush = 24, autopull = 24 (MSB first)
+
+wait_start:
+    set pindirs, 0              ; CMD на вход (High-Z)
+    wait 0 pin 0                ; Ждем стартовый бит 0 на CMD
+    set x, 23
+    set y, 1
+
+read_loop:
+    wait 1 pin 1                ; Нарастающий фронт CLK
+    in pins, 1                  ; Читаем 1 бит с CMD
+    wait 0 pin 1                ; Спад CLK
+    jmp x-- read_loop
+    set x, 23
+    jmp y-- read_loop
+
+    out x, 8                    ; Читаем счетчик задержки (0 = без ответа, 1 = сразу, 2 = +1 такт)
+    jmp !x wait_start           ; Если 0 — ответ не нужен
+
+delay_loop:
+    wait 1 pin 1                ; Ждем 1 такт CLK (минимум 1 такт после 48-го бита)
+    wait 0 pin 1
+    jmp x-- delay_loop          ; Повторяем (x + 1) раз
+
+start_tx:
+    set pins, 1                 ; Заранее ставим выход в '1' (Idle)
+    set pindirs, 1              ; Включаем CMD на выход
+
+    set x, 23
+    set y, 1
+
+write_loop:
+    out pins, 1                 ; Выставляем бит на спаде CLK
+    wait 1 pin 1                ; Хост читает на фронте CLK
+    wait 0 pin 1
+    jmp x-- write_loop
+    set x, 23
+    jmp y-- write_loop
+
+    set pins, 1
+    out null, 16                ; Очистка оставшихся 16 бит из 3-го слова (8 бит флага + 48 бит ответа = 56 бит = 3*24 - 16)
+    jmp wait_start

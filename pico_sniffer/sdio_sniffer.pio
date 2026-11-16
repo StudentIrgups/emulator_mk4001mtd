@@ -1,0 +1,19 @@
+.program sdio_sniffer
+
+; Pin 0 = CMD (только вход!)
+; Pin 1 = CLK (только вход!)
+; Включен autopush = 24 (MSB first)
+
+wait_start:
+    wait 0 pin 0                ; Ждем стартовый бит 0 на CMD (команда ИЛИ ответ)
+    set x, 23                   ; Первые 24 бита
+    set y, 1                    ; 2 половины = 48 бит
+
+read_loop:
+    wait 1 pin 1                ; Нарастающий фронт CLK
+    in pins, 1                  ; Читаем 1 бит с CMD (на 24-м сработает autopush)
+    wait 0 pin 1                ; Спад CLK
+    jmp x-- read_loop
+    set x, 23
+    jmp y-- read_loop
+    jmp wait_start              ; Сразу ждем следующий пакет (ответ диска или новую команду)

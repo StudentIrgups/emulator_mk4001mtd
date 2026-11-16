@@ -1,0 +1,37 @@
+.program sdio_pulse
+
+; Pin 0 = CMD (GP2), Pin 1 = CLK (GP3)
+; set_base = GP4 (DAT0) или GP5 (DAT1)
+
+public wait_cmd_start:
+    wait 1 pin 0
+    wait 0 pin 0                ; Ждем стартовый бит 0 на CMD (для самой первой CMD5)
+
+public run_pulse:
+    pull block                  ; Количество спадов CLK до подъема в '1'
+    mov x, osr
+    jmp !x set_high
+
+wait_fall_1:
+    wait 1 pin 1                ; pin 1 = CLK
+    wait 0 pin 1
+    jmp x-- wait_fall_1
+
+set_high:
+    set pins, 1                 ; Устанавливаем пин в '1' на спаде CLK
+    set pindirs, 1
+
+    pull block                  ; Длительность в тактах CLK (0 = оставить в '1' навсегда)
+    mov y, osr
+    jmp !y finish_keep_high
+
+hold_loop:
+    wait 1 pin 1
+    wait 0 pin 1
+    jmp y-- hold_loop
+
+    set pins, 0                 ; Опускаем пин в '0' на нужном спаде
+    set pindirs, 0
+
+finish_keep_high:
+    jmp run_pulse
