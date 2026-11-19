@@ -14,9 +14,11 @@
 #define PIN_DAT3 7
 
 void init_sdio_dat_pins() {
-    gpio_init(PIN_DAT2);
-    gpio_set_dir(PIN_DAT2, GPIO_IN);
-    gpio_pull_up(PIN_DAT2);
+    return;
+    gpio_init(PIN_DAT1);
+    gpio_set_dir(PIN_DAT1, GPIO_IN);
+    gpio_pull_up(PIN_DAT1);
+
     return;
     for (uint pin = PIN_DAT0; pin <= PIN_DAT3; pin++) {
         gpio_init(pin);
@@ -103,25 +105,23 @@ void reset_sdio_controller() {
     ata.status = 0x50;
 }
 
-// Расчет CRC7 для формирования ответа R1/R5/R6
 uint8_t calc_crc7(uint64_t data_40bit) {
-    uint8_t crc = 1; // Начальное значение CRC7 в контроллере MK4001MTD = 1!
-    for (int i = 37; i >= 0; i--) {
+    uint8_t crc = 0;
+    for (int i = 39; i >= 0; i--) {
         uint8_t bit = (data_40bit >> i) & 1;
-        uint8_t c = (crc >> 6) & 1;
-        crc = ((crc << 1) | bit) & 0x7F;
+        uint8_t c = ((crc >> 6) & 1) ^ bit;
+        crc = (crc << 1) & 0x7F;
         if (c) crc ^= 0x09;
     }
     return crc;
 }
 
-// Сборка 48-битного пакета ответа
 uint64_t make_response(uint8_t cmd_idx, uint32_t arg, bool use_crc = true) {
-    // Start bit = 0, Dir bit = 0 (Card -> Host)
     uint64_t frame = ((uint64_t)(cmd_idx & 0x3F) << 32) | arg;
     uint8_t crc = use_crc ? calc_crc7(frame) : 0x7F;
-    return (frame << 8) | (crc << 1) | 1; // End bit = 1
+    return (frame << 8) | (crc << 1) | 1;
 }
+
 
 // Выполнение ATA-команды, записанной в регистр 0x07 (Function 1)
 void execute_ata_command(uint8_t cmd) {
@@ -208,8 +208,6 @@ uint64_t handle_sdio_command(uint64_t raw_cmd, bool* has_response) {
             break;
         }
 
-
-
         case 52: { // IO_RW_DIRECT (Шаги 12..18 и далее)
             uint8_t rw = (arg >> 31) & 1;
             uint8_t fn = (arg >> 28) & 0x7;
@@ -222,6 +220,9 @@ uint64_t handle_sdio_command(uint64_t raw_cmd, bool* has_response) {
                     cccr[addr & 0x1FF] = data;
                     if (addr == 0x0002 && (data & 0x02)) {
                         cccr[0x0003] |= 0x02; // IO_ENABLE -> сразу ставим IO_READY = 0x02
+                        gpio_init(PIN_DAT1);
+                        gpio_set_dir(PIN_DAT1, GPIO_IN);
+                        gpio_pull_up(PIN_DAT1);
                     }
                     out_data = data;
                 } else {

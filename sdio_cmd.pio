@@ -5,7 +5,9 @@
 
 wait_start:
     set pindirs, 0              ; CMD на вход (High-Z)
-    wait 0 pin 0                ; Ждем стартовый бит 0 на CMD
+    mov isr, null               ; ГАРАНТИРОВАННАЯ очистка входного регистра от старых битов!
+    wait 1 pin 0                ; Ждем уровень покоя '1' на CMD
+    wait 0 pin 0                ; Ловим реальный старт-бит '0'
     set x, 23
     set y, 1
 
@@ -40,6 +42,6 @@ write_loop:
     set x, 23
     jmp y-- write_loop
 
-    set pins, 1
-    out null, 16                ; Очистка оставшихся 16 бит из 3-го слова (8 бит флага + 48 бит ответа = 56 бит = 3*24 - 16)
+    set pins, 1                 ; Уровень '1' на линию
+    out null, 16
     jmp wait_start
