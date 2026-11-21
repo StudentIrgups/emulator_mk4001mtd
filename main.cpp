@@ -142,34 +142,8 @@ void calc_sdio_4bit_crc16(const uint8_t* data, uint8_t* crc_out_8bytes) {
         c2 = crc16_byte(c2, p2);
         c3 = crc16_byte(c3, p3);
     }
-    crc_out_8bytes[0] = c0; 
-    crc_out_8bytes[1] = c1; 
-    crc_out_8bytes[2] = c2; 
-    crc_out_8bytes[3] = c3;
-}
-
-// Расчет 4-канального CRC16-CCITT (независимый CRC16 для каждой линии DAT0..DAT3)
-/*void calc_sdio_4bit_crc16(const uint8_t* data, uint8_t* crc_out_8bytes) {
-    uint16_t crc[4] = {0, 0, 0, 0};
-
-    for (int i = 0; i < 512; i++) {
-        uint8_t byte = data[i];
-        // Сначала старший ниббл (биты 7..4), затем младший ниббл (биты 3..0)
-        for (int nib = 1; nib >= 0; nib--) {
-            uint8_t val = (byte >> (nib * 4)) & 0x0F;
-            for (int line = 0; line < 4; line++) {
-                uint8_t bit = (val >> line) & 1;
-                uint8_t inv = ((crc[line] >> 15) & 1) ^ bit;
-                crc[line] <<= 1;
-                if (inv) {
-                    crc[line] ^= 0x1021;
-                }
-            }
-        }
-    }
-
+    uint16_t crc[4] = {c0, c1, c2, c3};
     memset(crc_out_8bytes, 0, 8);
-    // Упаковываем 16 бит CRC по 4 линиям в 16 нибблов (8 байт)
     for (int bit_idx = 0; bit_idx < 16; bit_idx++) {
         uint8_t nibble = 0;
         for (int line = 0; line < 4; line++) {
@@ -183,7 +157,7 @@ void calc_sdio_4bit_crc16(const uint8_t* data, uint8_t* crc_out_8bytes) {
             crc_out_8bytes[bit_idx / 2] |= nibble;
         }
     }
-}*/
+}
 
 // Передача одного 512-байтного блока по 4-битной шине DAT0..DAT3 (GP4..GP7) через PIO
 void send_512b_block_pio(const uint8_t* block_512) {
@@ -523,7 +497,7 @@ int main() {
     sm_config_set_set_pins(&c_dat, PIN_DAT0, 4);
     sm_config_set_out_shift(&c_dat, false, true, 32); // MSB-first, autopull = 32
     sm_config_set_clkdiv(&c_dat, 1.0f);
-    pio_sm_init(pio0, sm_dat, offset_dat, &c_dat);
+    pio_sm_init(pio1, sm_dat, offset_dat, &c_dat);
 
     init_sdio_dat_pins();
 
