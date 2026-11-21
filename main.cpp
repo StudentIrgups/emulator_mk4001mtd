@@ -3,6 +3,8 @@
 #include "pico/stdlib.h"
 #include "hardware/pio.h"
 #include "sdio_cmd.pio.h"
+#include "sdio_dat.pio.h"
+#include "hardware/clocks.h"
 
 // Назначение пинов (строго подряд: CMD = GP2, CLK = GP3)
 #define PIN_CMD 2
@@ -56,9 +58,120 @@ struct AtaRegisters {
 SdioState current_state = STATE_IDLE;
 uint8_t cmd5_poll_count = 0;
 uint8_t sector_buffer[512 * 16]; // Буфер на 16 секторов (8 КБ)
+uint16_t pending_cmd53_blocks = 0;
 
 // 512-байтный паспорт диска Toshiba MK4001MTD (4 ГБ)
 uint8_t identify_data[512] = {0};
+
+PIO pio = pio0;
+uint sm_dat =1;
+uint offset_dat = 0;
+
+// Расчет 4-канального CRC16-CCITT (независимый CRC16 для каждой линии DAT0..DAT3)
+void calc_sdio_4bit_crc16(const uint8_t* data, uint8_t* crc_out_8bytes) {
+    uint16_t crc[4] = {0, 0, 0, 0};
+
+    for (int i = 0; i < 512; i++) {
+        uint8_t byte = data[i];
+        // Сначала старший ниббл (биты 7..4), затем младший ниббл (биты 3..0)
+        for (int nib = 1; nib >= 0; nib--) {
+            uint8_t val = (byte >> (nib * 4)) & 0x0F;
+            for (int line = 0; line < 4; line++) {
+                uint8_t bit = (val >> line) & 1;
+                uint8_t inv = ((crc[line] >> 15) & 1) ^ bit;
+                crc[line] <<= 1;
+                if (inv) {
+                    crc[line] ^= 0x1021;
+                }
+            }
+        }
+    }
+
+    memset(crc_out_8bytes, 0, 8);
+    // Упаковываем 16 бит CRC по 4 линиям в 16 нибблов (8 байт)
+    for (int bit_idx = 0; bit_idx < 16; bit_idx++) {
+        uint8_t nibble = 0;
+        for (int line = 0; line < 4; line++) {
+            if ((crc[line] >> (15 - bit_idx)) & 1) {
+                nibble |= (1 << line);
+            }
+        }
+        if (bit_idx % 2 == 0) {
+            crc_out_8bytes[bit_idx / 2] |= (nibble << 4);
+        } else {
+            crc_out_8bytes[bit_idx / 2] |= nibble;
+        }
+    }
+}
+
+// Передача одного 512-байтного блока по 4-битной шине DAT0..DAT3 (GP4..GP7) через PIO
+void send_512b_block_pio(const uint8_t* block_512) {
+    uint8_t crc_bytes[8];
+    calc_sdio_4bit_crc16(block_512, crc_bytes);
+
+    // 1. Передаем управление пинами DAT0..DAT3 (GP4..GP7) в PIO0
+    for (uint pin = PIN_DAT0; pin <= PIN_DAT3; pin++) {
+        pio_gpio_init(pio0, pin);
+    }
+
+    // 2. Перезапускаем State Machine 1 (sm_dat) на метку start_tx
+    pio_sm_set_enabled(pio0, sm_dat, false);
+    pio_sm_clear_fifos(pio0, sm_dat);
+    pio_interrupt_clear(pio0, 0);
+    pio_sm_exec(pio0, sm_dat, pio_encode_jmp(offset_dat + sdio_dat_tx_offset_start_tx));
+    pio_sm_set_enabled(pio0, sm_dat, true);
+
+    // 3. Отправляем счетчик нибблов - 1: 1 (start) + 1024 (data) + 16 (crc) - 1 = 1040
+    pio_sm_put_blocking(pio0, sm_dat, 1040);
+
+    // 4. Формируем первое 32-битное слово (8 нибблов):
+    // [Start nibble 0x0 (4 бита)] + [первые 7 нибблов данных (block_512[0..2] и старший ниббл block_512[3])]
+    uint32_t first_word = 0; // Старший ниббл = 0x0 (Start bit на всех 4 линиях)
+    first_word |= ((uint32_t)block_512[0] << 20);
+    first_word |= ((uint32_t)block_512[1] << 12);
+    first_word |= ((uint32_t)block_512[2] << 4);
+    first_word |= ((uint32_t)(block_512[3] >> 4) & 0x0F);
+    pio_sm_put_blocking(pio0, sm_dat, first_word);
+
+    // 5. Упаковываем оставшиеся 1017 нибблов данных + 16 нибблов CRC + 3 ниббла заполнения (0xF) = 1036 нибблов (518 байт)
+    uint8_t tail_buf[518];
+    for (int i = 0; i < 508; i++) {
+        tail_buf[i] = (block_512[3 + i] << 4) | (block_512[4 + i] >> 4);
+    }
+    tail_buf[508] = (block_512[511] << 4) | (crc_bytes[0] >> 4);
+    for (int i = 0; i < 7; i++) {
+        tail_buf[509 + i] = (crc_bytes[i] << 4) | (crc_bytes[i + 1] >> 4);
+    }
+    tail_buf[516] = (crc_bytes[7] << 4) | 0x0F;
+    tail_buf[517] = 0xFF;
+
+    // Отправляем 516 байт (129 полных 32-битных слов) в TX FIFO
+    for (int i = 0; i < 516; i += 4) {
+        uint32_t w = ((uint32_t)tail_buf[i] << 24) |
+                     ((uint32_t)tail_buf[i + 1] << 16) |
+                     ((uint32_t)tail_buf[i + 2] << 8) |
+                     ((uint32_t)tail_buf[i + 3]);
+        pio_sm_put_blocking(pio0, sm_dat, w);
+    }
+    // Последний ниббл CRC + дополнение 0xF (130-е слово)
+    uint32_t last_word = ((uint32_t)tail_buf[516] << 24) | ((uint32_t)tail_buf[517] << 16) | 0xFFFF;
+    pio_sm_put_blocking(pio0, sm_dat, last_word);
+
+    // 6. Ждем аппаратного прерывания IRQ 0 от PIO об окончании передачи блока (включая Stop nibble 0xF)
+    while (!pio_interrupt_get(pio0, 0)) {
+        tight_loop_contents();
+    }
+
+    // 7. Возвращаем пины DAT0..DAT3 в управление процессора (SIO)
+    for (uint pin = PIN_DAT0; pin <= PIN_DAT3; pin++) {
+        gpio_init(pin);
+        gpio_set_dir(pin, GPIO_IN);
+        gpio_disable_pulls(pin);
+    }
+    // Удерживаем DAT1 в '1' (подтяжка вверх — состояние отсутствия прерывания IRQ)
+    gpio_pull_up(PIN_DAT1);
+}
+
 
 void init_identify_table() {
     memset(identify_data, 0, 512);
@@ -261,9 +374,13 @@ uint64_t handle_sdio_command(uint64_t raw_cmd, bool* has_response) {
             break;
         }
 
-        case 53: { // IO_RW_EXTENDED
-            uint32_t r5_arg = (0x20 << 8) | 0x00; // STATE=TRN
-            resp = make_response(53, r5_arg);
+        case 53: {
+            uint8_t rw = (arg >> 31) & 1;
+            uint16_t blocks = arg & 0x1FF;
+            if (rw == 0) {
+                pending_cmd53_blocks = (blocks == 0) ? 512 : blocks;
+            }
+            resp = make_response(53, (0x20 << 8) | 0x00);
             break;
         }
         default:
@@ -299,7 +416,7 @@ void init_sdio_cmd_pio(PIO pio, uint sm, uint offset) {
 }
 
 int main() {
-    init_sdio_dat_pins();
+    //set_sys_clock_khz(200000, true);    
     stdio_init_all();
     init_identify_table();
     reset_sdio_controller();
@@ -309,7 +426,19 @@ int main() {
     uint offset = pio_add_program(pio, &sdio_cmd_program);
     init_sdio_cmd_pio(pio, sm, offset);
 
+    offset_dat = pio_add_program(pio0, &sdio_dat_tx_program);
+    pio_sm_config c_dat = sdio_dat_tx_program_get_default_config(offset_dat);
+    sm_config_set_in_pins(&c_dat, PIN_CLK);           // pin 0 для wait = CLK (GP3)
+    sm_config_set_out_pins(&c_dat, PIN_DAT0, 4);      // DAT0..DAT3 (GP4..GP7)
+    sm_config_set_set_pins(&c_dat, PIN_DAT0, 4);
+    sm_config_set_out_shift(&c_dat, false, true, 32); // MSB-first, autopull = 32
+    sm_config_set_clkdiv(&c_dat, 1.0f);
+    pio_sm_init(pio0, sm_dat, offset_dat, &c_dat);
+
+    init_sdio_dat_pins();
+
     while (true) {
+        
         // 1. Читаем 48 бит команды из PIO RX FIFO (два слова по 24 бита)
         uint32_t cmd_hi = pio_sm_get_blocking(pio, sm) & 0xFFFFFF;
         uint32_t cmd_lo = pio_sm_get_blocking(pio, sm) & 0xFFFFFF;
@@ -340,6 +469,15 @@ int main() {
             pio_sm_put_blocking(pio, sm, word1_24 << 8);
             pio_sm_put_blocking(pio, sm, word2_24 << 8);
             pio_sm_put_blocking(pio, sm, word3_24 << 8);
+
+            if (pending_cmd53_blocks > 0) {
+                for (uint16_t b = 0; b < pending_cmd53_blocks; b++) {
+                    send_512b_block_pio(&sector_buffer[b * 512]);
+                }
+                pending_cmd53_blocks = 0;
+                ata.status = 0x50;
+                cccr[0x05] |= 0x02;
+            }
         } else {
             pio_sm_put_blocking(pio, sm, 0);
         }
