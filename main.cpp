@@ -111,6 +111,7 @@ void send_512b_block_pio(const uint8_t* block_512) {
 
     // 1. Передаем управление пинами DAT0..DAT3 (GP4..GP7) в PIO0
     for (uint pin = PIN_DAT0; pin <= PIN_DAT3; pin++) {
+        gpio_disable_pulls(PIN_DAT1);
         pio_gpio_init(pio1, pin);
     }
 
@@ -252,6 +253,8 @@ void execute_ata_command(uint8_t cmd) {
         case 0x20: // READ SECTORS
             ata.status = 0xD8;
             cccr[0x05] |= 0x02;
+            gpio_set_dir(PIN_DAT1, GPIO_OUT);
+            gpio_put(PIN_DAT1, 0); // Аппаратный IRQ = 0
             break;
 
         case 0x30: // WRITE SECTORS
@@ -270,6 +273,8 @@ void execute_ata_command(uint8_t cmd) {
             }
             ata.status = 0x50;
             cccr[0x05] |= 0x02;
+            gpio_set_dir(PIN_DAT1, GPIO_OUT);
+            gpio_put(PIN_DAT1, 0); // Аппаратный IRQ = 0
             break;
 
         case 0xE0: // STANDBY IMMEDIATE
@@ -430,14 +435,14 @@ int main() {
     uint offset = pio_add_program(pio, &sdio_cmd_program);
     init_sdio_cmd_pio(pio, sm, offset);
 
-    offset_dat = pio_add_program(pio0, &sdio_dat_tx_program);
+    offset_dat = pio_add_program(pio1, &sdio_dat_tx_program);
     pio_sm_config c_dat = sdio_dat_tx_program_get_default_config(offset_dat);
     sm_config_set_in_pins(&c_dat, PIN_CLK);           // pin 0 для wait = CLK (GP3)
     sm_config_set_out_pins(&c_dat, PIN_DAT0, 4);      // DAT0..DAT3 (GP4..GP7)
     sm_config_set_set_pins(&c_dat, PIN_DAT0, 4);
     sm_config_set_out_shift(&c_dat, false, true, 32); // MSB-first, autopull = 32
     sm_config_set_clkdiv(&c_dat, 1.0f);
-    pio_sm_init(pio1, sm_dat, offset_dat, &c_dat);
+    pio_sm_init(pio0, sm_dat, offset_dat, &c_dat);
 
     init_sdio_dat_pins();
 
