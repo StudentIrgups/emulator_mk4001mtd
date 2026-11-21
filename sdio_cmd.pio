@@ -42,6 +42,6 @@ write_loop:
     set x, 23
     jmp y-- write_loop
 
-    set pins, 1                 ; Уровень '1' на линию
-    out null, 16
+    irq set 1                   ; Сигнализируем C++: 48-й бит ответа R5 только что передан!
+    out null, 16                ; Сбрасываем остаток OSR
     jmp wait_start
