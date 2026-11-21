@@ -111,18 +111,18 @@ void send_512b_block_pio(const uint8_t* block_512) {
 
     // 1. Передаем управление пинами DAT0..DAT3 (GP4..GP7) в PIO0
     for (uint pin = PIN_DAT0; pin <= PIN_DAT3; pin++) {
-        pio_gpio_init(pio0, pin);
+        pio_gpio_init(pio1, pin);
     }
 
     // 2. Перезапускаем State Machine 1 (sm_dat) на метку start_tx
-    pio_sm_set_enabled(pio0, sm_dat, false);
-    pio_sm_clear_fifos(pio0, sm_dat);
-    pio_interrupt_clear(pio0, 0);
-    pio_sm_exec(pio0, sm_dat, pio_encode_jmp(offset_dat + sdio_dat_tx_offset_start_tx));
-    pio_sm_set_enabled(pio0, sm_dat, true);
+    pio_sm_set_enabled(pio1, sm_dat, false);
+    pio_sm_clear_fifos(pio1, sm_dat);
+    pio_interrupt_clear(pio1, 0);
+    pio_sm_exec(pio1, sm_dat, pio_encode_jmp(offset_dat + sdio_dat_tx_offset_start_tx));
+    pio_sm_set_enabled(pio1, sm_dat, true);
 
     // 3. Отправляем счетчик нибблов - 1: 1 (start) + 1024 (data) + 16 (crc) - 1 = 1040
-    pio_sm_put_blocking(pio0, sm_dat, 1040);
+    pio_sm_put_blocking(pio1, sm_dat, 1040);
 
     // 4. Формируем первое 32-битное слово (8 нибблов):
     // [Start nibble 0x0 (4 бита)] + [первые 7 нибблов данных (block_512[0..2] и старший ниббл block_512[3])]
@@ -131,7 +131,7 @@ void send_512b_block_pio(const uint8_t* block_512) {
     first_word |= ((uint32_t)block_512[1] << 12);
     first_word |= ((uint32_t)block_512[2] << 4);
     first_word |= ((uint32_t)(block_512[3] >> 4) & 0x0F);
-    pio_sm_put_blocking(pio0, sm_dat, first_word);
+    pio_sm_put_blocking(pio1, sm_dat, first_word);
 
     // 5. Упаковываем оставшиеся 1017 нибблов данных + 16 нибблов CRC + 3 ниббла заполнения (0xF) = 1036 нибблов (518 байт)
     uint8_t tail_buf[518];
@@ -151,14 +151,14 @@ void send_512b_block_pio(const uint8_t* block_512) {
                      ((uint32_t)tail_buf[i + 1] << 16) |
                      ((uint32_t)tail_buf[i + 2] << 8) |
                      ((uint32_t)tail_buf[i + 3]);
-        pio_sm_put_blocking(pio0, sm_dat, w);
+        pio_sm_put_blocking(pio1, sm_dat, w);
     }
     // Последний ниббл CRC + дополнение 0xF (130-е слово)
     uint32_t last_word = ((uint32_t)tail_buf[516] << 24) | ((uint32_t)tail_buf[517] << 16) | 0xFFFF;
-    pio_sm_put_blocking(pio0, sm_dat, last_word);
+    pio_sm_put_blocking(pio1, sm_dat, last_word);
 
     // 6. Ждем аппаратного прерывания IRQ 0 от PIO об окончании передачи блока (включая Stop nibble 0xF)
-    while (!pio_interrupt_get(pio0, 0)) {
+    while (!pio_interrupt_get(pio1, 0)) {
         tight_loop_contents();
     }
 
@@ -245,6 +245,8 @@ void execute_ata_command(uint8_t cmd) {
             memcpy(sector_buffer, identify_data, 512);
             ata.status = 0xD8; // BSY + DRQ (как в реальном MK4001MTD)
             cccr[0x05] |= 0x02; // INT_PENDING (Function 1 IRQ)
+            gpio_set_dir(PIN_DAT1, GPIO_OUT);
+            gpio_put(PIN_DAT1, 0); // Аппаратный IRQ = 0
             break;
 
         case 0x20: // READ SECTORS
@@ -364,6 +366,8 @@ uint64_t handle_sdio_command(uint64_t raw_cmd, bool* has_response) {
                         case 0x07:
                             out_data = ata.status; // На шаге 12 вернет 0x50
                             cccr[0x05] &= ~0x02;   // Сброс флага прерывания при чтении STATUS
+                            gpio_set_dir(PIN_DAT1, GPIO_IN);
+                            gpio_pull_up(PIN_DAT1); // Снимаем IRQ (1)
                             break;
                     }
                 }
@@ -433,7 +437,7 @@ int main() {
     sm_config_set_set_pins(&c_dat, PIN_DAT0, 4);
     sm_config_set_out_shift(&c_dat, false, true, 32); // MSB-first, autopull = 32
     sm_config_set_clkdiv(&c_dat, 1.0f);
-    pio_sm_init(pio0, sm_dat, offset_dat, &c_dat);
+    pio_sm_init(pio1, sm_dat, offset_dat, &c_dat);
 
     init_sdio_dat_pins();
 
@@ -486,7 +490,6 @@ int main() {
                 }
                 pending_cmd53_blocks = 0;
                 ata.status = 0x50;
-                cccr[0x05] |= 0x02;
             }
         } else {
             pio_sm_put_blocking(pio, sm, 0);
