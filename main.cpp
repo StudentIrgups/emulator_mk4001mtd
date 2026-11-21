@@ -416,7 +416,7 @@ void init_sdio_cmd_pio(PIO pio, uint sm, uint offset) {
 }
 
 int main() {
-    //set_sys_clock_khz(200000, true);    
+    set_sys_clock_khz(200000, true);    
     stdio_init_all();
     init_identify_table();
     reset_sdio_controller();
@@ -471,6 +471,16 @@ int main() {
             pio_sm_put_blocking(pio, sm, word3_24 << 8);
 
             if (pending_cmd53_blocks > 0) {
+                // 1. Ждем, пока все 3 слова ответа R5 уйдут из TX FIFO в сдвиговый регистр
+                while (!pio_sm_is_tx_fifo_empty(pio, sm)) {
+                    tight_loop_contents();
+                }
+                // 2. Ждем, пока sm_cmd закончит выталкивать последний байт R5 и вернется в wait_start
+                while (pio_sm_get_pc(pio, sm) > offset + 2) {
+                    tight_loop_contents();
+                }
+
+                // 3. Мгновенно (через ~20 нс, строго в окне N_AC) отдаем блок по DAT0..DAT3
                 for (uint16_t b = 0; b < pending_cmd53_blocks; b++) {
                     send_512b_block_pio(&sector_buffer[b * 512]);
                 }

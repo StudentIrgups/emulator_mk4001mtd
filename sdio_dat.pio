@@ -7,6 +7,7 @@
 public start_tx:
     pull block                  ; Берем счетчик нибблов - 1 (1040 = 1 start + 1024 data + 16 crc - 1)
     mov x, osr
+    out null, 32
     set pins, 0x0F              ; Уровень '1' на всех DAT0-3
     wait 0 pin 0                ; Ждем низкий уровень CLK
     set pindirs, 0x0F           ; Включаем DAT0-DAT3 на выход
