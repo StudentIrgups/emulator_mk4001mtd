@@ -208,12 +208,21 @@ void send_512b_block_pio() {
     pio_sm_set_enabled(pio1, sm_dat, false);
     pio_sm_clear_fifos(pio1, sm_dat);
     pio_interrupt_clear(pio1, 0);
-    pio_sm_exec(pio1, sm_dat, pio_encode_jmp(offset_dat + sdio_dat_tx_offset_start_tx));
-    pio_sm_set_enabled(pio1, sm_dat, true);
+    pio_sm_exec(pio1, sm_dat, pio_encode_jmp(offset_dat + sdio_dat_tx_offset_start_tx));    
 
     // Счетчик нибблов - 1 (1040) + 131 готовое слово без каких-либо вычислений
     pio_sm_put_blocking(pio1, sm_dat, 1040);
-    for (int i = 0; i < 131; i++) {
+    pio_sm_put_blocking(pio1, sm_dat, pio_tx_words[0]);
+    pio_sm_put_blocking(pio1, sm_dat, pio_tx_words[1]);
+    pio_sm_put_blocking(pio1, sm_dat, pio_tx_words[2]);
+
+    pio_sm_set_enabled(pio1, sm_dat, true);
+
+    uint32_t t0 = time_us_32();
+    for (int i = 3; i < 131; i++) {
+        while (pio_sm_is_tx_fifo_full(pio1, sm_dat)) { 
+            if ((time_us_32() - t0) > 5000) break;
+        }
         pio_sm_put_blocking(pio1, sm_dat, pio_tx_words[i]);
     }
 
@@ -233,6 +242,73 @@ void send_512b_block_pio() {
 
 
 void init_identify_table() {
+    memset(identify_data, 0, 512);
+
+    auto set_word = [](int w, uint16_t val) {
+        identify_data[w * 2] = val & 0xFF;
+        identify_data[w * 2 + 1] = (val >> 8) & 0xFF;
+    };
+
+    set_word(0, 0x0040);    // Non-removable ATA device
+    set_word(1, 7769);      // Cylinders (0x1E59)
+    set_word(3, 16);        // Heads
+    set_word(6, 63);        // Sectors per track
+
+    // Word 10-19: Serial number (20 ASCII chars, byte-swapped)
+    const char* serial = "02601102T           ";
+    memcpy(&identify_data[20], serial, 20);
+
+    // Word 23-26: Firmware revision (8 ASCII chars, byte-swapped)
+    const char* fw = "CJ01A0  ";
+    memcpy(&identify_data[46], fw, 8);
+
+    // Word 27-46: Model number ("TOSHIBA MK4001MTD", byte-swapped)
+    const char* model = "OTHSBI AM4K00M1DT                       ";
+    memcpy(&identify_data[54], model, 40);
+
+    set_word(47, 0x8010);   // Max 16 sectors per interrupt (READ/WRITE MULTIPLE)
+    set_word(49, 0x0F00);   // Capabilities: DMA, LBA, IORDY, Standby supported
+    set_word(50, 0x4000);   // Capabilities
+    set_word(51, 0x0200);   // PIO mode 2
+    set_word(53, 0x0007);   // Words 54-58, 64-70, 88 are valid!
+
+    set_word(54, 7769);     // Current cylinders
+    set_word(55, 16);       // Current heads
+    set_word(56, 63);       // Current sectors per track
+    uint32_t total_sectors = 7831152; // 0x00777E70 (4 GB)
+    set_word(57, total_sectors & 0xFFFF);
+    set_word(58, (total_sectors >> 16) & 0xFFFF);
+    set_word(59, 0x0110);   // Multiple sector setting valid (16 sectors)
+
+    set_word(60, total_sectors & 0xFFFF);
+    set_word(61, (total_sectors >> 16) & 0xFFFF);
+
+    set_word(63, 0x0007);   // Multiword DMA modes 0-2 supported
+    set_word(64, 0x0003);   // PIO modes 3-4 supported
+    set_word(65, 120);      // Min MW DMA cycle time (ns)
+    set_word(66, 120);      // Recommended MW DMA cycle time
+    set_word(67, 120);      // Min PIO cycle time without flow control
+    set_word(68, 120);      // Min PIO cycle time with IORDY
+
+    set_word(80, 0x007E);   // Major version: ATA/ATAPI-1..6
+    set_word(81, 0x0019);   // Minor version
+    set_word(82, 0x346B);   // Command sets supported (SMART, Power Mgmt, Write cache, Look-ahead)
+    set_word(83, 0x5004);   // Command sets supported (APM)
+    set_word(84, 0x4000);   // Command set extension
+    set_word(85, 0x3469);   // Command sets enabled
+    set_word(86, 0x1004);   // Command sets enabled
+    set_word(87, 0x4000);   // Command set default
+    set_word(88, 0x003F);   // Ultra DMA modes 0-5 supported
+    set_word(93, 0x600B);   // Hardware reset result
+
+    // Word 255: Integrity word (0xA5 в младшем байте + контрольная сумма в старшем)
+    identify_data[510] = 0xA5;
+    uint8_t sum = 0;
+    for (int i = 0; i < 511; i++) {
+        sum += identify_data[i];
+    }
+    identify_data[511] = (uint8_t)(-sum);
+    /*
     memset(identify_data, 0, 512);
 
     // Word 0: 0x0040 (Non-removable, non-ATAPI) — строго проверяется Nokia N91
@@ -264,7 +340,7 @@ void init_identify_table() {
     identify_data[120] = (total_sectors >> 0) & 0xFF;
     identify_data[121] = (total_sectors >> 8) & 0xFF;
     identify_data[122] = (total_sectors >> 16) & 0xFF;
-    identify_data[123] = (total_sectors >> 24) & 0xFF;
+    identify_data[123] = (total_sectors >> 24) & 0xFF;*/
 }
 
 void reset_sdio_controller() {
@@ -301,6 +377,7 @@ void execute_ata_command(uint8_t cmd) {
 
     switch (cmd) {
         case 0xEC: // IDENTIFY DEVICE            
+            gpio_put(25, 1);
             memcpy(sector_buffer, identify_data, 512);
             ata.status = 0xD8; // BSY + DRQ (как в реальном MK4001MTD)
             cccr[0x05] |= 0x02; // INT_PENDING (Function 1 IRQ)
@@ -310,6 +387,7 @@ void execute_ata_command(uint8_t cmd) {
             break;
 
         case 0x20: // READ SECTORS            
+            gpio_put(25, 1);
             ata.status = 0xD8;
             cccr[0x05] |= 0x02;
             prepare_pio_block(sector_buffer);
@@ -487,8 +565,12 @@ void init_sdio_cmd_pio(PIO pio, uint sm, uint offset) {
 int main() {
     set_sys_clock_khz(200000, true);    
     stdio_init_all();
+
     init_identify_table();
-    reset_sdio_controller();
+    reset_sdio_controller();  
+    
+    gpio_init(25);
+    gpio_set_dir(25, GPIO_OUT);  
 
     PIO pio = pio0;
     uint sm = 0;
@@ -500,10 +582,12 @@ int main() {
     sm_config_set_in_pins(&c_dat, PIN_CLK);           // pin 0 для wait = CLK (GP3)
     sm_config_set_out_pins(&c_dat, PIN_DAT0, 4);      // DAT0..DAT3 (GP4..GP7)
     sm_config_set_set_pins(&c_dat, PIN_DAT0, 4);
-    sm_config_set_out_shift(&c_dat, false, true, 32); // MSB-first, autopull = 32
+    sm_config_set_out_shift(&c_dat, false, true, 32); // MSB-first, autopull = 32    
+    sm_config_set_fifo_join(&c_dat, PIO_FIFO_JOIN_TX);
     sm_config_set_clkdiv(&c_dat, 1.0f);
+    
     pio_sm_init(pio1, sm_dat, offset_dat, &c_dat);
-
+    
     init_sdio_dat_pins();
 
     while (true) {

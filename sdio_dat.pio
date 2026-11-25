@@ -12,9 +12,12 @@ public start_tx:
     wait 0 pin 0                ; Ждем низкий уровень CLK
     set pindirs, 0x0F           ; Включаем DAT0-DAT3 на выход
 
+    wait 1 pin 0                ; Обязательный 1 такт паузы N_AC (удерживаем 0x0F)
+    wait 0 pin 0
+
 tx_loop:
+    wait 1 pin 0
     out pins, 4                 ; Выставляем 4 бита (ниббл) на спаде CLK
-    wait 1 pin 0                ; N91 считывает на фронте CLK
     wait 0 pin 0                ; Ждем спад CLK
     jmp x-- tx_loop
 
